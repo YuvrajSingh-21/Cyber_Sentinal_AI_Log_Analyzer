@@ -4,6 +4,8 @@ Intelligent Log Analysis & Anomaly Detection Platform
 Cyber Sentinel AI is a full-stack cybersecurity application designed to analyze system and application logs in real time, detect anomalies, and provide actionable insights through an interactive dashboard.
 The platform combines a modern frontend with a scalable backend to help security analysts and developers identify threats, unusual behavior, and system issues efficiently.
 
+====================================================================================================================================================================================================================
+
 🚀 Features
 
 📊 Real-time Log Monitoring
@@ -22,8 +24,9 @@ The platform combines a modern frontend with a scalable backend to help security
 
 🔐 Environment-based Configuration
 
-🧱 Tech Stack
-Frontend
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+🧱 Tech Stack Frontend
 
 ⚛️ React + TypeScript
 
@@ -32,6 +35,8 @@ Frontend
 📊 Recharts
 
 🔌 WebSocket integration
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Backend
 
@@ -42,3 +47,4 @@ Backend
 🔍 Anomaly Detection Logic
 
 📡 REST APIs & WebSockets
+
