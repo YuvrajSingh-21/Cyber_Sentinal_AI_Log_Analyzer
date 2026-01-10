@@ -129,56 +129,6 @@ export const useCyberData = () => {
     );
   }, [logs]);
 
-  // useEffect(() => {
-  //   if (!normalizedLogs.length) return;
-
-  //   // --- SYSTEM LOGS ---
-  //   const systemLogs = normalizedLogs.filter(l => l.source === 'system');
-
-  //   let cpu = 0;
-  //   let memory = 0;
-  //   let disk = 0;
-
-  //   for (const log of systemLogs) {
-  //     if (typeof log.message !== 'string') continue;
-
-  //     cpu = extractPercent('CPU', log.message) ?? cpu;
-  //     memory = extractPercent('MEM', log.message) ?? memory;
-  //     disk = extractPercent('DISK', log.message) ?? disk;
-  //   }
-
-  //   // --- NETWORK HOSTS (UNIQUE IPs) ---
-  //   const networkLogs = normalizedLogs.filter(l => l.source === 'network');
-
-  //   const uniqueNetworkHosts = new Set<string>();
-  //   for (const log of networkLogs) {
-  //     if (log.ip) uniqueNetworkHosts.add(log.ip);
-  //   }
-
-  //   const networkConnections = uniqueNetworkHosts.size;
-
-  //   // --- ACTIVE PROCESSES ---
-  //   const activeProcesses = systemLogs.length;
-
-  //   // --- UPTIME ---
-  //   const uptimeSeconds =
-  //     normalizedLogs.length > 0
-  //       ? Math.floor(
-  //           (Date.now() -
-  //             normalizedLogs[normalizedLogs.length - 1].timestamp.getTime()) /
-  //             1000
-  //         )
-  //       : 0;
-
-  //   setMetrics({
-  //     cpu,
-  //     memory,
-  //     disk,
-  //     networkConnections,
-  //     activeProcesses,
-  //     uptime: `${uptimeSeconds}s`,
-  //   });
-  // }, [normalizedLogs]);
 
   useEffect(() => {
     if (!normalizedLogs.length) return;

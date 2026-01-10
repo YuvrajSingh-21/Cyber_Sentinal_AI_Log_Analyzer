@@ -2,7 +2,7 @@ import os
 import json
 import google.generativeai as genai
 # Configure Gemini
-genai.configure(api_key="AIzaSyBo2zugjx3u2WcvDRHhcmKQN_hOiZlNQf4")
+genai.configure(api_key=os.getenv("API_KEY"))
 
 MODEL_NAME = "gemini-2.5-flash"
 
