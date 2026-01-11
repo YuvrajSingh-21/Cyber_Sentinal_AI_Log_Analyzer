@@ -1,13 +1,14 @@
 from pydantic import BaseModel
 from datetime import datetime
+from typing import  Optional
 
 class LogCreate(BaseModel):
     endpoint_id: str
     log_type: str
     source: str
-    severity: str
+    severity: str = "low"
     message: str
-    raw_data: str | None = None
+    raw_data: Optional[str] = None
     
 
 class LogResponse(LogCreate):

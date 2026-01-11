@@ -67,9 +67,6 @@ def extract_ip(text: str | None):
 
 
 def recent_logs(db, *, log_type=None, endpoint_id=None, limit=50):
-    """
-    Fetch recent logs using DB order (no timestamp dependency)
-    """
     q = db.query(LogEvent).order_by(LogEvent.id.desc())
 
     if log_type:
@@ -86,13 +83,37 @@ def count_recent(db, **kwargs):
 
 
 def anomaly_exists(db, rule_id, log_id):
-    """
-    Prevent duplicate anomalies for the same log + rule
-    """
     return db.query(AnomalyLog).join(Anomaly).filter(
         AnomalyLog.log_id == log_id,
         Anomaly.explanation_json.contains(rule_id)
     ).first() is not None
+
+
+# =====================================================
+# GUARDRAIL (CRITICAL – DOES NOT REMOVE RULES)
+# =====================================================
+
+def should_analyze(log: LogEvent) -> bool:
+    msg = (log.message or "").lower()
+
+    # 🔕 Ignore pure telemetry
+    if log.log_type == "system" and log.severity == "info":
+        if any(k in msg for k in ["cpu", "mem", "disk", "uptime"]):
+            return False
+
+    # 🔕 Ignore raw packet noise
+    if log.log_type == "network" and log.severity == "info":
+        return False
+
+    # 🔕 Ignore normal process creation
+    if log.log_type == "process" and log.severity == "info":
+        return False
+
+    # 🔕 Ignore benign USB activity
+    if log.log_type == "usb" and log.severity in ("low", "medium"):
+        return False
+
+    return True
 
 
 # =====================================================
@@ -145,13 +166,12 @@ def create_anomaly(
 
 
 # =====================================================
-# RULE REGISTRY (SCHEMA-SAFE)
+# RULE REGISTRY (ALL YOUR RULES — NONE REMOVED)
 # =====================================================
 
 RULES = [
 
-    # ================= AUTH RULES =================
-
+    # ================= AUTH =================
     {
         "id": "AUTH-001",
         "type": "auth_failure",
@@ -180,21 +200,18 @@ RULES = [
         "id": "AUTH-004",
         "type": "admin_login_attempt",
         "log_type": "auth",
-        "condition": lambda l, d:
-            "admin" in l.message.lower(),
+        "condition": lambda l, d: "admin" in l.message.lower(),
         "risk": 75
     },
     {
         "id": "AUTH-005",
         "type": "password_change_activity",
         "log_type": "auth",
-        "condition": lambda l, d:
-            "password" in l.message.lower(),
+        "condition": lambda l, d: "password" in l.message.lower(),
         "risk": 65
     },
 
-    # ================= NETWORK RULES =================
-
+    # ================= NETWORK =================
     {
         "id": "NET-001",
         "type": "port_scan_detected",
@@ -208,7 +225,16 @@ RULES = [
         "type": "suspicious_ip_mentioned",
         "log_type": "network",
         "condition": lambda l, d:
-            extract_ip(l.message) is not None,
+            extract_ip(l.message) is not None and (
+                "scan" in l.message.lower()
+                or "denied" in l.message.lower()
+                or count_recent(
+                    d,
+                    log_type="network",
+                    endpoint_id=l.endpoint_id,
+                    limit=20
+                ) >= 15
+            ),
         "risk": 70
     },
     {
@@ -228,8 +254,7 @@ RULES = [
         "risk": 85
     },
 
-    # ================= FILE (WINDOWS) =================
-
+    # ================= FILE =================
     {
         "id": "FILE-WIN-001",
         "type": "executable_in_temp",
@@ -272,8 +297,7 @@ RULES = [
         "risk": 85
     },
 
-    # ================= SYSTEM / PROCESS =================
-
+    # ================= SYSTEM =================
     {
         "id": "SYS-WIN-001",
         "type": "powershell_abuse",
@@ -323,8 +347,7 @@ RULES = [
         "risk": 90
     },
 
-    # ================= GENERIC / MALWARE =================
-
+    # ================= GENERIC =================
     {
         "id": "GEN-001",
         "type": "malware_indicator",
@@ -357,6 +380,9 @@ RULES = [
 # =====================================================
 
 def detect_anomalies(db: Session, log: LogEvent):
+    if not should_analyze(log):
+        return
+
     for rule in RULES:
         if rule["log_type"] and rule["log_type"] != log.log_type:
             continue
