@@ -68,31 +68,57 @@ export const SystemChart = ({
         />
       </div>
 
-      {/* History Chart */}
       {showHistory && (
-        <div className="flex items-end gap-1 h-16">
-          {history.map((val, i) => (
-            <div
-              key={i}
-              className={cn(
-                "flex-1 rounded-t transition-all duration-300",
-                getBarColor(val)
-              )}
-              style={{ 
-                height: `${(val / maxValue) * 100}%`,
-                opacity: (i + 1) / history.length * 0.5 + 0.5
-              }}
+        <div className="h-16 w-full">
+          <svg
+            viewBox="0 0 100 40"
+            preserveAspectRatio="none"
+            className="w-full h-full"
+          >
+            {/* Gradient */}
+            <defs>
+              <linearGradient id={`line-${title}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity="0.6" />
+                <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity="0.05" />
+              </linearGradient>
+            </defs>
+
+            {/* Area under line */}
+            <path
+              d={`
+                M 0 40
+                ${history
+                  .map((val, i) => {
+                    const x = (i / (Math.max(history.length - 1, 1))) * 100;
+                    const y = 40 - (val / maxValue) * 40;
+                    return `L ${x} ${y}`;
+                  })
+                  .join(' ')}
+                L 100 40
+                Z
+              `}
+              fill={`url(#line-${title})`}
             />
-          ))}
-          {/* Fill remaining slots */}
-          {Array.from({ length: 20 - history.length }).map((_, i) => (
-            <div
-              key={`empty-${i}`}
-              className="flex-1 h-1 rounded-t bg-muted/50"
+
+            {/* Line */}
+            <polyline
+              fill="none"
+              stroke="hsl(var(--primary))"
+              strokeWidth="2"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              points={history
+                .map((val, i) => {
+                  const x = (i / (Math.max(history.length - 1, 1))) * 100;
+                  const y = 40 - (val / maxValue) * 40;
+                  return `${x},${y}`;
+                })
+                .join(' ')}
             />
-          ))}
+          </svg>
         </div>
       )}
+
     </div>
   );
 };

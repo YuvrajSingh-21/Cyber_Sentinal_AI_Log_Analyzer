@@ -10,12 +10,44 @@ interface DashboardProps {
   metrics: SystemMetrics;
   anomalies: Anomaly[];
 }
+import { useEffect, useState } from 'react';
+
+function useTrend(current: number, threshold = 0.1) {
+  const [prev, setPrev] = useState<number | null>(null);
+
+  let trend: 'up' | 'down' | 'neutral' = 'neutral';
+  let trendValue = 'stable';
+
+  if (prev !== null) {
+    const diff = current - prev;
+
+    if (Math.abs(diff) >= threshold) {
+      trend = diff > 0 ? 'up' : 'down';
+
+      const percent =
+        prev === 0 ? 100 : Math.round((diff / prev) * 100);
+
+      trendValue = `${diff > 0 ? '+' : ''}${percent}%`;
+    }
+  }
+
+  useEffect(() => {
+    const t = setTimeout(() => setPrev(current), 1000); // ⏱️ delay update
+    return () => clearTimeout(t);
+  }, [current]);
+
+  return { trend, trendValue };
+}
+
 
 export const Dashboard = ({ logs, metrics, anomalies }: DashboardProps) => {
   const activeAnomalies = anomalies.filter(a => a.status === 'active').length;
   const recentLogs = logs.slice(0, 50);
   const criticalLogs = logs.filter(l => l.severity === 'critical' || l.severity === 'high').length;
-  
+  const cpuTrend = useTrend(metrics.cpu, 0.3);
+  const networkTrend = useTrend(metrics.networkConnections, 0.1);
+  const anomalyTrend = useTrend(activeAnomalies, 1);
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Page Header */}
@@ -45,17 +77,17 @@ export const Dashboard = ({ logs, metrics, anomalies }: DashboardProps) => {
           subtitle={`${metrics.activeProcesses} active processes`}
           icon={Cpu}
           variant={metrics.cpu > 80 ? 'critical' : metrics.cpu > 60 ? 'warning' : 'default'}
-          trend="neutral"
-          trendValue="stable"
+          trend={cpuTrend.trend}
+          trendValue={cpuTrend.trendValue}
         />
         <MetricCard
-          title="Network Connections"
+          title="Network Hosts"
           value={metrics.networkConnections}
-          subtitle="Active TCP/UDP"
+          subtitle="Active Hosts"
           icon={Network}
           variant="default"
-          trend="up"
-          trendValue="+12%"
+          trend={networkTrend.trend}
+          trendValue={networkTrend.trendValue}
         />
         <MetricCard
           title="Active Anomalies"
@@ -63,8 +95,8 @@ export const Dashboard = ({ logs, metrics, anomalies }: DashboardProps) => {
           subtitle={`${anomalies.length} total detected`}
           icon={AlertTriangle}
           variant={activeAnomalies > 5 ? 'critical' : activeAnomalies > 0 ? 'warning' : 'success'}
-          trend={activeAnomalies > 0 ? 'up' : 'neutral'}
-          trendValue={activeAnomalies > 0 ? 'needs attention' : 'all clear'}
+          trend={anomalyTrend.trend}
+          trendValue={anomalyTrend.trendValue}
         />
         <MetricCard
           title="System Uptime"

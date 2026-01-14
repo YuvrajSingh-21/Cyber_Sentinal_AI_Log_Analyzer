@@ -324,15 +324,15 @@ export const Settings = () => {
             <input
               type="range"
               min="7"
-              max="365"
-              step="7"
+              max="30"
+              step="1"
               value={settings.dataRetention}
               onChange={(e) => updateSettings('dataRetention', parseInt(e.target.value))}
               className="w-full accent-primary"
             />
             <div className="flex justify-between text-xs text-muted-foreground mt-1">
               <span>7 days</span>
-              <span>1 year</span>
+              <span>30 days</span>
             </div>
           </div>
 

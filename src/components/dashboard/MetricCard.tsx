@@ -1,13 +1,14 @@
 import { cn } from '@/lib/utils';
 import { LucideIcon } from 'lucide-react';
+import { n } from 'node_modules/framer-motion/dist/types.d-a9pt5qxk';
 
 interface MetricCardProps {
   title: string;
   value: string | number;
   subtitle?: string;
   icon: LucideIcon;
-  trend?: 'up' | 'down' | 'neutral';
-  trendValue?: string;
+  trend?: 'up' | 'down' | 'neutral' | null;
+  trendValue?: string | number | null;
   variant?: 'default' | 'success' | 'warning' | 'critical';
   className?: string;
 }
@@ -46,17 +47,19 @@ export const MetricCard = ({
           <Icon className="w-6 h-6" />
         </div>
         
-        {trend && trendValue && (
-          <div className={cn(
-            "flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full",
-            trend === 'up' && "bg-success/10 text-success",
-            trend === 'down' && "bg-destructive/10 text-destructive",
-            trend === 'neutral' && "bg-muted text-muted-foreground"
-          )}>
+        {trend !== undefined && trendValue !== undefined && (
+          <div
+            className={cn(
+              "flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full",
+              trend === 'up' && "bg-success/10 text-success",
+              trend === 'down' && "bg-destructive/10 text-destructive",
+              trend === 'neutral' && "bg-muted text-muted-foreground"
+            )}
+          >
             {trend === 'up' && '↑'}
             {trend === 'down' && '↓'}
             {trend === 'neutral' && '→'}
-            {trendValue}
+            <span>{trendValue}</span>
           </div>
         )}
       </div>

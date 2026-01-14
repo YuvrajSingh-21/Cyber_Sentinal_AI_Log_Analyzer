@@ -8,6 +8,7 @@ export interface LogEntry {
   message: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
   hash: string;
+  raw_data?: any;
 }
 
 export interface Anomaly {

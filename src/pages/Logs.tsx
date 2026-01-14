@@ -334,18 +334,21 @@ export const Logs = () => {
 
   // Adapt backend logs → UI logs (NO UI CHANGE)
   const logs: LogEntry[] = useMemo(() => {
-    return backendLogs.map((log: any) => ({
-      id: String(log.id),
-      timestamp: new Date(log.timestamp),
-      eventType: log.log_type,
-      source: log.source,
-      severity: log.severity,
-      message: log.message,
-      status: deriveStatus(log.severity),
-      ip: extractIP(log.raw_data),
-      hash: generateHash(log),
-    }));
+    return backendLogs
+      .filter((log: any) => log.log_type !== 'system_metrics') // 🔑 HIDE METRICS
+      .map((log: any) => ({
+        id: String(log.id),
+        timestamp: new Date(log.timestamp),
+        eventType: log.log_type,
+        source: log.source,
+        severity: log.severity,
+        message: log.message,
+        status: deriveStatus(log.severity),
+        ip: extractIP(log.raw_data),
+        hash: generateHash(log),
+      }));
   }, [backendLogs]);
+
 
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<string>('all');

@@ -1,7 +1,17 @@
-import { useState, useEffect, useCallback,useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { LogEntry, Anomaly, TimelineEvent, SystemMetrics } from '@/types/cyber';
 import { apiFetch } from '@/lib/api';
 
+/* ================= SAFE JSON PARSER ================= */
+function safeParseRawData(raw: any): any | null {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 export const useCyberData = () => {
   /* -------------------- STATE -------------------- */
@@ -16,59 +26,66 @@ export const useCyberData = () => {
     activeProcesses: 0,
     uptime: 0,
   });
-
+  const [liveMetrics, setLiveMetrics] = useState<SystemMetrics | null>(null);
+  const [activeHosts, setActiveHosts] = useState<Set<string>>(new Set());
 
   const [isLive, setIsLive] = useState(true);
-  
+
+  /* -------------------- FETCH LOGS -------------------- */
   useEffect(() => {
     let isMounted = true;
 
     const fetchLogs = async () => {
       try {
         const data = await apiFetch<any[]>('/api/logs/explorer');
-
         if (!isMounted || !Array.isArray(data)) return;
 
-        const normalizedLogs: LogEntry[] = data.map((log) => ({
-          id: String(log.id),
+        const normalizedLogs: LogEntry[] = data.map((log) => {
+          const rawType = (log.log_type || '').toLowerCase();
 
-          // 🔥 CRITICAL: string → Date
-          timestamp: new Date(log.timestamp),
+          const source =
+            rawType === 'network'
+              ? 'network'
+              : rawType === 'file'
+              ? 'file'
+              : rawType === 'auth'
+              ? 'auth'
+              : 'system';
 
-          // backend → frontend mapping
-          eventType: log.log_type ?? 'system',
+          return {
+            id: String(log.id),
+            timestamp: new Date(log.timestamp),
+            eventType: log.log_type ?? 'system',
 
-          source: ['network', 'system', 'file', 'auth'].includes(
-            (log.log_type || '').toLowerCase()
-          )
-            ? log.log_type.toLowerCase()
-            : 'system',
+            source, // ✅ FIXED
 
-          severity:
-            log.severity === 'critical'
-              ? 'critical'
-              : log.severity === 'high'
-              ? 'high'
-              : log.severity === 'medium'
-              ? 'medium'
-              : 'low',
+            severity:
+              log.severity === 'critical'
+                ? 'critical'
+                : log.severity === 'high'
+                ? 'high'
+                : log.severity === 'medium'
+                ? 'medium'
+                : 'low',
 
-          message: log.message,
+            message: log.message ?? '',
+            raw_data: log.raw_data ?? null,
 
-          ip: log.message?.match(/\b\d{1,3}(\.\d{1,3}){3}\b/)?.[0],
+            ip: log.message?.match(/\b\d{1,3}(\.\d{1,3}){3}\b/)?.[0],
+            hash: btoa(`${log.id}-${log.timestamp}`).slice(0, 16),
 
-          hash: btoa(`${log.id}-${log.timestamp}`).slice(0, 16),
+            status:
+              log.severity === 'critical'
+                ? 'error'
+                : log.severity === 'high'
+                ? 'warning'
+                : log.severity === 'medium'
+                ? 'info'
+                : 'success',
+          };
+        });
 
-          status:
-          log.severity === 'critical'
-            ? 'error'
-            : log.severity === 'high'
-            ? 'warning'
-            : log.severity === 'medium'
-            ? 'info'
-            : 'success',
 
-        }));
 
         setLogs(normalizedLogs);
       } catch (err) {
@@ -85,19 +102,21 @@ export const useCyberData = () => {
     };
   }, []);
 
-
+  /* -------------------- TIMELINE -------------------- */
   useEffect(() => {
     apiFetch<any[]>('/api/timeline')
-      .then(data => {
+      .then((data) => {
         if (Array.isArray(data)) {
           setTimeline(data.map(normalizeTimelineEvent));
         }
       })
-      .catch(err => console.error('❌ Timeline fetch failed', err));
+      .catch((err) => console.error('❌ Timeline fetch failed', err));
   }, []);
 
+  /* -------------------- ANOMALIES -------------------- */
   useEffect(() => {
     let isMounted = true;
+
     const fetchAnomalies = async () => {
       try {
         const data = await apiFetch<any[]>('/api/anomalies');
@@ -112,149 +131,235 @@ export const useCyberData = () => {
     fetchAnomalies();
     const interval = setInterval(fetchAnomalies, 3000);
 
-      return () => {
-        isMounted = false;
-        clearInterval(interval);
-      };
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
+  /* -------------------- NORMALIZED LOGS -------------------- */
   const normalizedLogs = useMemo(() => {
     return logs.filter(
       (l): l is LogEntry =>
+        l &&
         typeof l === 'object' &&
-        l !== null &&
-        'source' in l &&
-        'timestamp' in l &&
-        l.timestamp instanceof Date
+        l.timestamp instanceof Date &&
+        !isNaN(l.timestamp.getTime())
     );
   }, [logs]);
 
+  /* -------------------- METRICS -------------------- */
 
-  useEffect(() => {
-    if (!normalizedLogs.length) return;
+useEffect(() => {
+  if (!normalizedLogs.length) return;
 
-    // --- SYSTEM LOGS ---
-    const systemLogs = normalizedLogs.filter(l => l.source === 'system');
+  // ⚠️ ALWAYS recompute from the newest timestamp
+  let latest: LogEntry | null = null;
 
-    let cpu = 0;
-    let memory = 0;
-    let disk = 0;
-
-    for (const log of systemLogs) {
-      if (typeof log.message !== 'string') continue;
-
-      cpu = extractPercent('CPU', log.message) ?? cpu;
-      memory = extractPercent('MEM', log.message) ?? memory;
-      disk = extractPercent('DISK', log.message) ?? disk;
+  for (const l of normalizedLogs) {
+    if (l.eventType !== 'system_metrics' || !l.raw_data) continue;
+    if (!latest || l.timestamp > latest.timestamp) {
+      latest = l;
     }
+  }
 
-    // --- NETWORK HOSTS ---
-    const networkLogs = normalizedLogs.filter(l => l.source === 'network');
-    const uniqueHosts = new Set<string>();
+  if (!latest) return;
 
-    for (const log of networkLogs) {
-      if (log.ip) uniqueHosts.add(log.ip);
-    }
+  const data = safeParseRawData(latest.raw_data);
+  if (!data) return;
 
-    const networkConnections = uniqueHosts.size;
-    const activeProcesses = systemLogs.length;
-
-    const uptime =
-      Math.floor(
-        (Date.now() -
-          normalizedLogs[normalizedLogs.length - 1].timestamp.getTime()) / 1000
+  let disk = 0;
+  if (data.disks) {
+    const values = Object.values(data.disks) as Array<{
+      used_percent?: number;
+    }>;
+    if (values.length) {
+      disk = Math.round(
+        values.reduce((s, d) => s + (d.used_percent ?? 0), 0) /
+          values.length
       );
+    }
+  }
 
-    // ✅ SAFE STATE UPDATE (THIS IS THE FIX)
-    setMetrics(prev => {
-      if (
-        prev.cpu === cpu &&
-        prev.memory === memory &&
-        prev.disk === disk &&
-        prev.networkConnections === networkConnections &&
-        prev.activeProcesses === activeProcesses &&
-        prev.uptime === uptime
-      ) {
-        return prev; // ⛔ STOP HERE → no re-render
+  setMetrics((prev) => ({
+    ...prev,
+    cpu: data.cpu_percent ?? prev.cpu,
+    memory: data.memory_percent ?? prev.memory,
+    disk,
+    uptime: data.uptime_seconds ?? prev.uptime,
+  }));
+}, [normalizedLogs]);
+
+useEffect(() => {
+  setLiveMetrics(prev => ({
+    ...prev,
+    networkConnections: activeHosts.size,
+  }));
+}, [activeHosts]);
+// 🔑 DERIVE NETWORK CONNECTIONS FROM LOGS (ACTIVE HOSTS)
+useEffect(() => {
+  const hosts = new Set<string>();
+
+  logs.forEach((log) => {
+    if (log.eventType === 'network' && log.raw_data) {
+      const data =
+        typeof log.raw_data === 'string'
+          ? JSON.parse(log.raw_data)
+          : log.raw_data;
+
+      if (data?.src_ip) {
+        hosts.add(data.src_ip);
       }
+    }
+  });
 
-      return {
-        cpu,
-        memory,
-        disk,
-        networkConnections,
-        activeProcesses,
-        uptime,
-      };
-    });
-  }, [normalizedLogs]);
+  setMetrics((prev) => ({
+    ...prev,
+    networkConnections: hosts.size,
+  }));
+}, [logs]);
 
-
-  /* -------------------- WEBSOCKET (LIVE LOGS) -------------------- */
+  /* -------------------- WEBSOCKET -------------------- */
   useEffect(() => {
-    if (!isLive) return;
-    let isMounted = true;
-    const ws = new WebSocket(
-      'ws://localhost:8000/ws/alerts?endpoint_id=default'
-    );
+  if (!isLive) return;
 
-    ws.onmessage = async (event) => {
-      try {
-        const payload = JSON.parse(event.data);
+  const ws = new WebSocket(
+    'ws://localhost:8000/ws/alerts?endpoint_id=default'
+  );
 
-        // 🔹 log event
-        if (payload.log_type) {
-          setLogs(prev => [payload, ...prev].slice(0, 200));
-        }
+  ws.onmessage = async (event) => {
+    try {
+      const payload = JSON.parse(event.data);
 
-        // 🔹 anomaly refresh
-        const anomaliesData = await apiFetch<any[]>('/api/anomalies');
-        if (Array.isArray(anomaliesData)) {
-          setAnomalies(anomaliesData.map(normalizeAnomaly));
-        }
+      /* ---------------- LOGS (UNCHANGED) ---------------- */
+      if (payload.log_type) {
+        const normalized: LogEntry = {
+          id: String(payload.id ?? crypto.randomUUID()),
+          timestamp: payload.timestamp
+            ? new Date(payload.timestamp)
+            : new Date(),
+          eventType: payload.log_type ?? 'system',
+          source: payload.log_type ?? 'system',
+          severity:
+            payload.severity === 'critical'
+              ? 'critical'
+              : payload.severity === 'high'
+              ? 'high'
+              : payload.severity === 'medium'
+              ? 'medium'
+              : 'low',
+          message: payload.message ?? '',
+          raw_data: payload.raw_data ?? null,
+          status: 'info',
+          hash: crypto.randomUUID().slice(0, 12),
+        };
 
-        // 🔹 timeline refresh
-        const timelineData = await apiFetch<any[]>('/api/timeline');
-        if (Array.isArray(timelineData)) {
-          setTimeline(timelineData.map(normalizeTimelineEvent));
-        }
-      } catch (err) {
-        console.error('❌ WS message error', err);
+        setLogs((prev) => [normalized, ...prev].slice(0, 200));
       }
-    };
+
+      /* ---------------- 🔑 LIVE SYSTEM METRICS (NEW) ---------------- */
+      if (payload.log_type === 'system_metrics' && payload.raw_data) {
+        const data =
+          typeof payload.raw_data === 'string'
+            ? JSON.parse(payload.raw_data)
+            : payload.raw_data;
+
+        let disk = 0;
+        if (data?.disks) {
+          const values = Object.values(data.disks) as Array<{
+            used_percent?: number;
+          }>;
+
+          if (values.length) {
+            disk = Math.round(
+              values.reduce(
+                (sum, d) => sum + (d.used_percent ?? 0),
+                0
+              ) / values.length
+            );
+          }
+        }
+         // 🔑 TRACK ACTIVE HOSTS (NETWORK STATE)
+        if (payload.log_type === 'network' && payload.raw_data) {
+          const data =
+            typeof payload.raw_data === 'string'
+              ? JSON.parse(payload.raw_data)
+              : payload.raw_data;
+
+          if (data?.src_ip) {
+            setActiveHosts(prev => {
+              const next = new Set(prev);
+              next.add(data.src_ip);
+              return next;
+            });
+          }
+        }
+
+        setLiveMetrics((prev) => ({
+          cpu: data.cpu_percent ?? prev?.cpu ?? 0,
+          memory: data.memory_percent ?? prev?.memory ?? 0,
+          disk,
+          networkConnections: activeHosts.size,
+          activeProcesses: prev?.activeProcesses ?? 0,
+          uptime: data.uptime_seconds ?? prev?.uptime ?? 0,
+        }));
+      }
+
+      /* ---------------- ANOMALIES (UNCHANGED) ---------------- */
+      const anomaliesData = await apiFetch<any[]>('/api/anomalies');
+      if (Array.isArray(anomaliesData)) {
+        setAnomalies(anomaliesData.map(normalizeAnomaly));
+      }
+
+      /* ---------------- TIMELINE (UNCHANGED) ---------------- */
+      const timelineData = await apiFetch<any[]>('/api/timeline');
+      if (Array.isArray(timelineData)) {
+        setTimeline(timelineData.map(normalizeTimelineEvent));
+      }
+    } catch (err) {
+      console.error('❌ WS message error', err);
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error('❌ WebSocket error', err);
+  };
+
+  return () => {
+    ws.close();
+  };
+}, [isLive]);
 
 
-    ws.onerror = (err) => {
-      console.error('❌ WebSocket error', err);
-    };
-
-    return () => {
-      isMounted = false;
-      ws.close();
-    };
-  }, [isLive]);
-
-  /* -------------------- ANOMALY STATUS UPDATE -------------------- */
+  /* -------------------- ACTIONS -------------------- */
   const updateAnomalyStatus = useCallback(
     async (id: string, status: Anomaly['status']) => {
       await apiFetch(`/api/anomalies/${id}/status?status=${status}`, {
         method: 'PATCH',
       });
 
-      setAnomalies(prev =>
-        prev.map(a => (a.id === id ? { ...a, status } : a))
+      setAnomalies((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status } : a))
       );
     },
     []
   );
+  const fetchAnomalyXAI = useCallback(async (id: string) => {
+    try {
+      const data = await apiFetch(`/api/anomalies/${id}/xai`);
+      return data;
+    } catch (err) {
+      console.error('❌ Failed to fetch anomaly XAI', err);
+      return null;
+    }
+  }, []);
 
-  /* -------------------- ACTIONS -------------------- */
   const clearLogs = useCallback(() => {
     setLogs([]);
   }, []);
 
   const toggleLive = useCallback(() => {
-    setIsLive(prev => !prev);
+    setIsLive((prev) => !prev);
   }, []);
 
   /* -------------------- EXPORT -------------------- */
@@ -267,32 +372,27 @@ export const useCyberData = () => {
     updateAnomalyStatus,
     clearLogs,
     toggleLive,
+    fetchAnomalyXAI,
   };
 };
 
+/* ================= NORMALIZERS ================= */
 
 function normalizeAnomaly(raw: any): Anomaly {
   return {
     id: String(raw.id ?? crypto.randomUUID()),
-
     title:
       raw.title ??
       raw.anomaly_type ??
       raw.log_type ??
       'Security Anomaly',
-
     description:
       raw.description ??
       raw.details ??
       raw.message ??
       'Suspicious behavior detected',
-
-    timestamp: raw.timestamp
-      ? new Date(raw.timestamp)
-      : new Date(),
-
+    timestamp: raw.timestamp ? new Date(raw.timestamp) : new Date(),
     source: raw.source ?? 'system',
-
     severity:
       raw.severity === 'critical'
         ? 'critical'
@@ -301,24 +401,17 @@ function normalizeAnomaly(raw: any): Anomaly {
         : raw.severity === 'medium'
         ? 'medium'
         : 'low',
-
     riskScore:
       typeof raw.risk_score === 'number'
         ? raw.risk_score
         : typeof raw.riskScore === 'number'
         ? raw.riskScore
         : 60,
-
-    type:
-      raw.type ??
-      raw.anomaly_type ??
-      'suspicious_activity',
-
+    type: raw.type ?? raw.anomaly_type ?? 'suspicious_activity',
     xaiReason:
       raw.xai_reason ??
       raw.xaiReason ??
       'Model detected abnormal deviation from baseline behavior',
-
     status:
       raw.status === 'resolved'
         ? 'resolved'
@@ -327,41 +420,30 @@ function normalizeAnomaly(raw: any): Anomaly {
         : raw.status === 'dismissed'
         ? 'dismissed'
         : 'active',
-
     relatedLogs: Array.isArray(raw.related_logs)
       ? raw.related_logs.map(String)
-      : Array.isArray(raw.relatedLogs)
-      ? raw.relatedLogs.map(String)
       : [],
   };
 }
 
-
-
 function normalizeTimelineEvent(raw: any): TimelineEvent {
   return {
     id: String(raw.id),
-
     timestamp: new Date(raw.timestamp),
-
     title:
       raw.title ??
       raw.event_type ??
       raw.log_type?.toUpperCase() ??
       'Timeline Event',
-
     description:
       raw.description ??
       raw.message ??
       'Event recorded',
-
-    // ✅ REQUIRED FIELD
     type:
       raw.type ??
       raw.event_type ??
       raw.log_type ??
       'system',
-
     severity:
       raw.severity === 'critical'
         ? 'critical'
@@ -370,8 +452,6 @@ function normalizeTimelineEvent(raw: any): TimelineEvent {
         : raw.severity === 'medium'
         ? 'medium'
         : 'low',
-
-    // ✅ REQUIRED ENUM
     category:
       raw.category ??
       (raw.anomaly_id
@@ -381,20 +461,11 @@ function normalizeTimelineEvent(raw: any): TimelineEvent {
         : raw.log_type === 'change'
         ? 'change'
         : 'alert'),
-
-    // ✅ REQUIRED FIELD
     details:
       raw.details ??
       raw.raw_data ??
       raw.message ??
       'No additional details',
-
     source: raw.source ?? 'system',
   };
-}
-
-function extractPercent(label: string, message: string): number | null {
-  const regex = new RegExp(`${label}\\s*(\\d+(\\.\\d+)?)%`, 'i');
-  const match = message.match(regex);
-  return match ? Number(match[1]) : null;
 }

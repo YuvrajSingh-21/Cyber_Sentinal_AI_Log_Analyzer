@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from app.database import Base, engine
-from app.routes import logs, websocket, anomalies, timeline, reports, upload
+from app.routes import logs, websocket, anomalies, timeline, reports, upload, xai_routes
 from app.models.logs import LogEvent
 from app.models.anomalies import Anomaly
 from app.models.anomaly_logs import AnomalyLog
 from app.models.uploaded_logs import UploadedLog
 from app.models.uploaded_log_entries import UploadedLogEntry
+from dotenv import load_dotenv
+load_dotenv()
 
 import threading
 import time
@@ -37,6 +39,7 @@ app.include_router(anomalies.router)
 app.include_router(timeline.router)
 app.include_router(reports.router)
 app.include_router(upload.router)
+app.include_router(xai_routes.router)
 
 
 CLEANUP_INTERVAL = 60 * 60  # 1 hour

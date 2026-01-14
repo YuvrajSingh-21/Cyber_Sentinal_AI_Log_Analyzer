@@ -31,7 +31,10 @@ const statusDots = {
 
 export const LiveLogFeed = ({ logs, maxItems = 10 }: LiveLogFeedProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const displayLogs = logs.slice(0, maxItems);
+  const displayLogs = logs
+    .filter((log) => log.eventType !== 'system_metrics') // 🔑 HIDE METRICS
+    .slice(0, maxItems);
+
 
   useEffect(() => {
     if (containerRef.current && logs.length > 0) {

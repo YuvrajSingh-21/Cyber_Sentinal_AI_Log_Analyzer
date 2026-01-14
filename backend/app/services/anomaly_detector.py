@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from uuid import uuid4
 import json
-import re
+from datetime import datetime, timezone, timedelta
 
 from app.models.anomalies import Anomaly
 from app.models.anomaly_logs import AnomalyLog
@@ -10,8 +10,10 @@ from app.services.xai_engine import generate_xai_explanation
 
 
 # =====================================================
-# CONFIG
+# CONFIGURATION (WINDOWS)
 # =====================================================
+
+BUSINESS_HOURS = range(6, 22)
 
 WINDOWS_CRITICAL_PATHS = [
     "c:\\windows\\system32",
@@ -36,46 +38,53 @@ SUSPICIOUS_WINDOWS_COMMANDS = [
     "certutil",
     "bitsadmin",
     "mshta",
-    "wmic"
+    "wmic",
 ]
 
 GENERIC_THREAT_KEYWORDS = [
-    "malware",
-    "exploit",
-    "unauthorized",
-    "bruteforce",
-    "backdoor",
-    "mimikatz",
-    "credential dump",
-    "ransomware",
-    "port scan"
+    "malware", "exploit", "unauthorized",
+    "bruteforce", "backdoor", "mimikatz",
+    "credential dump", "lsass", "ransomware"
 ]
 
 
 # =====================================================
-# HELPERS
+# HELPER FUNCTIONS
 # =====================================================
+def parse_raw_data(log: LogEvent) -> dict:
+    if not log.raw_data:
+        return {}
+    if isinstance(log.raw_data, dict):
+        return log.raw_data
+    try:
+        return json.loads(log.raw_data)
+    except Exception:
+        return {}
 
-IP_REGEX = r"(?:\d{1,3}\.){3}\d{1,3}"
+def get_src_ip(log: LogEvent):
+    data = parse_raw_data(log)
+    return data.get("src_ip") or data.get("ip")
 
 
-def extract_ip(text: str | None):
-    if not text:
-        return None
-    match = re.search(IP_REGEX, text)
-    return match.group(0) if match else None
+def get_dst_ip(log: LogEvent):
+    data = parse_raw_data(log)
+    return data.get("dst_ip")
 
 
-def recent_logs(db, *, log_type=None, endpoint_id=None, limit=50):
-    q = db.query(LogEvent).order_by(LogEvent.id.desc())
+def recent_logs(db, *, log_type=None, ip=None, minutes=5):
+    since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    q = db.query(LogEvent).filter(LogEvent.timestamp >= since)
 
     if log_type:
         q = q.filter(LogEvent.log_type == log_type)
 
-    if endpoint_id:
-        q = q.filter(LogEvent.endpoint_id == endpoint_id)
+    logs = q.all()
 
-    return q.limit(limit).all()
+    if ip:
+        return [l for l in logs if get_src_ip(l) == ip]
+
+    return logs
+
 
 
 def count_recent(db, **kwargs):
@@ -87,33 +96,6 @@ def anomaly_exists(db, rule_id, log_id):
         AnomalyLog.log_id == log_id,
         Anomaly.explanation_json.contains(rule_id)
     ).first() is not None
-
-
-# =====================================================
-# GUARDRAIL (CRITICAL – DOES NOT REMOVE RULES)
-# =====================================================
-
-def should_analyze(log: LogEvent) -> bool:
-    msg = (log.message or "").lower()
-
-    # 🔕 Ignore pure telemetry
-    if log.log_type == "system" and log.severity == "info":
-        if any(k in msg for k in ["cpu", "mem", "disk", "uptime"]):
-            return False
-
-    # 🔕 Ignore raw packet noise
-    if log.log_type == "network" and log.severity == "info":
-        return False
-
-    # 🔕 Ignore normal process creation
-    if log.log_type == "process" and log.severity == "info":
-        return False
-
-    # 🔕 Ignore benign USB activity
-    if log.log_type == "usb" and log.severity in ("low", "medium"):
-        return False
-
-    return True
 
 
 # =====================================================
@@ -144,10 +126,51 @@ def create_anomaly(
         )
     except Exception:
         xai = {
-            "summary": "Security anomaly detected using rule-based analysis",
-            "factors": signals,
-            "confidence": 0.7
+            "summary": "Suspicious activity detected by rule-based engine",
+            "confidence": 0.7,
+
+            "why_flagged": [
+                {
+                    "signal": k,
+                    "explanation": str(v),
+                    "severity": "high"
+                }
+                for k, v in signals.items()
+            ],
+
+            "remediation_steps": [
+                {
+                    "step": 1,
+                    "action": "Review the affected endpoint and verify the activity",
+                    "reason": "Confirm whether the detected behavior is authorized"
+                },
+                {
+                    "step": 2,
+                    "action": "Inspect related logs and network connections",
+                    "reason": "Identify potential lateral movement or misuse"
+                }
+            ],
+
+            "preventive_measures": [
+                {
+                    "control": "Network monitoring",
+                    "purpose": "Detect abnormal internal traffic patterns"
+                },
+                {
+                    "control": "Least privilege enforcement",
+                    "purpose": "Reduce the impact of compromised accounts"
+                }
+            ],
+
+            "evidence": [
+                {
+                    "type": "log",
+                    "source": log.log_type,
+                    "description": "Rule-based anomaly triggered"
+                }
+            ]
         }
+
 
     anomaly = Anomaly(
         id=anomaly_id,
@@ -155,6 +178,7 @@ def create_anomaly(
         status="active",
         risk_score=risk_score,
         source=source,
+        created_at=datetime.now(timezone.utc),
         explanation_json=json.dumps(xai)
     )
 
@@ -162,16 +186,25 @@ def create_anomaly(
     db.add(AnomalyLog(anomaly_id=anomaly_id, log_id=log.id))
     db.commit()
 
-    print(f"🚨 [{rule_id}] {anomaly_type} (risk={risk_score})")
+    print(f"🚨 [{rule_id}] {anomaly_type} | Risk={risk_score}")
 
 
-# =====================================================
-# RULE REGISTRY (ALL YOUR RULES — NONE REMOVED)
-# =====================================================
 
 RULES = [
 
-    # ================= AUTH =================
+    # =================================================
+    # IGNORE SYSTEM METRICS (VERY IMPORTANT)
+    # =================================================
+    {
+        "id": "SYS-METRIC-IGNORE",
+        "type": "ignore_system_metrics",
+        "log_type": "system_metrics",
+        "condition": lambda l, d: False,
+        "risk": 0
+    },
+
+    # ================= AUTH RULES =================
+
     {
         "id": "AUTH-001",
         "type": "auth_failure",
@@ -183,8 +216,9 @@ RULES = [
         "id": "AUTH-002",
         "type": "brute_force_attempt",
         "log_type": "auth",
-        "condition": lambda l, d:
-            count_recent(d, log_type="auth", endpoint_id=l.endpoint_id, limit=10) >= 5,
+        "condition": lambda l, d: count_recent(
+            d, log_type="auth", ip=get_src_ip(l), minutes=2
+        ) >= 5,
         "risk": 85
     },
     {
@@ -193,195 +227,197 @@ RULES = [
         "log_type": "auth",
         "condition": lambda l, d:
             "success" in l.message.lower() and
-            count_recent(d, log_type="auth", endpoint_id=l.endpoint_id, limit=10) >= 3,
+            count_recent(d, log_type="auth", ip=get_src_ip(l), minutes=5) >= 3,
         "risk": 95
     },
     {
         "id": "AUTH-004",
-        "type": "admin_login_attempt",
+        "type": "login_outside_business_hours",
         "log_type": "auth",
-        "condition": lambda l, d: "admin" in l.message.lower(),
-        "risk": 75
-    },
-    {
-        "id": "AUTH-005",
-        "type": "password_change_activity",
-        "log_type": "auth",
-        "condition": lambda l, d: "password" in l.message.lower(),
-        "risk": 65
+        "condition": lambda l, d: l.timestamp.hour not in BUSINESS_HOURS,
+        "risk": 70
     },
 
     # ================= NETWORK =================
+
     {
         "id": "NET-001",
-        "type": "port_scan_detected",
+        "type": "port_scan",
         "log_type": "network",
-        "condition": lambda l, d:
-            "port scan" in l.message.lower(),
+        "condition": lambda l, d: "scan" in l.message.lower(),
         "risk": 80
     },
     {
         "id": "NET-002",
-        "type": "suspicious_ip_mentioned",
+        "type": "connection_flood",
         "log_type": "network",
-        "condition": lambda l, d:
-            extract_ip(l.message) is not None and (
-                "scan" in l.message.lower()
-                or "denied" in l.message.lower()
-                or count_recent(
-                    d,
-                    log_type="network",
-                    endpoint_id=l.endpoint_id,
-                    limit=20
-                ) >= 15
-            ),
-        "risk": 70
-    },
-    {
-        "id": "NET-003",
-        "type": "ddos_indicator",
-        "log_type": "network",
-        "condition": lambda l, d:
-            "flood" in l.message.lower() or "ddos" in l.message.lower(),
-        "risk": 90
-    },
-    {
-        "id": "NET-004",
-        "type": "lateral_movement_indicator",
-        "log_type": "network",
-        "condition": lambda l, d:
-            "internal" in l.message.lower() and "connection" in l.message.lower(),
+        "condition": lambda l, d: (
+            parse_raw_data(l).get("src_ip") and
+            count_recent(
+                d,
+                log_type="network",
+                ip=get_src_ip(l),
+                minutes=1
+            ) >= 100
+        ),
         "risk": 85
     },
 
+    {
+        "id": "NET-003",
+        "type": "internal_lateral_movement",
+        "log_type": "network",
+        "condition": lambda l, d: 
+            get_src_ip(l) and get_dst_ip(l) and
+            get_src_ip(l).startswith("10.") and
+            get_dst_ip(l).startswith("10."),
+        "risk": 85
+    },
+
+
     # ================= FILE =================
+
     {
         "id": "FILE-WIN-001",
         "type": "executable_in_temp",
         "log_type": "file",
         "condition": lambda l, d:
-            "\\temp\\" in (l.raw_data or "").lower() and
-            any((l.raw_data or "").lower().endswith(ext) for ext in SENSITIVE_EXTENSIONS),
+            l.raw_data and "\\temp\\" in l.raw_data.lower() and
+            any(l.raw_data.lower().endswith(ext) for ext in SENSITIVE_EXTENSIONS),
         "risk": 95
-    },
-    {
-        "id": "FILE-WIN-002",
-        "type": "system_binary_modified",
-        "log_type": "file",
-        "condition": lambda l, d:
-            "system32" in (l.raw_data or "").lower(),
-        "risk": 90
-    },
-    {
-        "id": "FILE-WIN-003",
-        "type": "startup_persistence",
-        "log_type": "file",
-        "condition": lambda l, d:
-            "startup" in (l.raw_data or "").lower(),
-        "risk": 95
-    },
-    {
-        "id": "FILE-WIN-004",
-        "type": "script_drop",
-        "log_type": "file",
-        "condition": lambda l, d:
-            any(ext in (l.raw_data or "").lower() for ext in [".ps1", ".vbs", ".bat"]),
-        "risk": 85
-    },
-    {
-        "id": "FILE-WIN-005",
-        "type": "mass_file_activity",
-        "log_type": "file",
-        "condition": lambda l, d:
-            count_recent(d, log_type="file", endpoint_id=l.endpoint_id, limit=30) >= 20,
-        "risk": 85
     },
 
-    # ================= SYSTEM =================
+    # ================= PROCESS =================
+
+    # {
+    #     "id": "PROC-001",
+    #     "type": "suspicious_shell_process",
+    #     "log_type": "process",
+    #     "condition": lambda l, d:
+    #         l.raw_data and any(
+    #             x in l.raw_data.lower()
+    #             for x in ["powershell.exe", "cmd.exe", "wscript.exe"]
+    #         ),
+    #     "risk": 75
+    # },
+
+    # ================= REGISTRY =================
+
     {
-        "id": "SYS-WIN-001",
-        "type": "powershell_abuse",
-        "log_type": "system",
+        "id": "REG-001",
+        "type": "registry_run_key_persistence",
+        "log_type": "registry",
         "condition": lambda l, d:
-            "powershell" in l.message.lower(),
-        "risk": 85
-    },
-    {
-        "id": "SYS-WIN-002",
-        "type": "encoded_command",
-        "log_type": "system",
-        "condition": lambda l, d:
-            "-enc" in l.message.lower() or "base64" in l.message.lower(),
-        "risk": 95
-    },
-    {
-        "id": "SYS-WIN-003",
-        "type": "lolbin_usage",
-        "log_type": "system",
-        "condition": lambda l, d:
-            any(x in l.message.lower() for x in ["certutil", "bitsadmin", "mshta"]),
+            l.raw_data and any(
+                k in l.raw_data.lower()
+                for k in ["\\run\\", "\\runonce\\"]
+            ),
         "risk": 90
     },
+
+    # ================= SCHEDULED TASK =================
+
     {
-        "id": "SYS-WIN-004",
-        "type": "defender_disabled",
-        "log_type": "system",
-        "condition": lambda l, d:
-            "defender" in l.message.lower() and "disabled" in l.message.lower(),
-        "risk": 98
-    },
-    {
-        "id": "SYS-WIN-005",
-        "type": "credential_dumping",
-        "log_type": "system",
-        "condition": lambda l, d:
-            "lsass" in l.message.lower(),
-        "risk": 98
-    },
-    {
-        "id": "SYS-WIN-006",
+        "id": "TASK-001",
         "type": "scheduled_task_created",
-        "log_type": "system",
+        "log_type": "task",
         "condition": lambda l, d:
-            "scheduled task" in l.message.lower(),
-        "risk": 90
+            l.raw_data and "create" in l.raw_data.lower(),
+        "risk": 70
     },
 
-    # ================= GENERIC =================
+    # ================= SERVICE =================
+
+    {
+        "id": "SERVICE-001",
+        "type": "service_created_or_modified",
+        "log_type": "service",
+        "condition": lambda l, d:
+            l.raw_data and any(
+                k in l.raw_data.lower()
+                for k in ["create", "config", "change"]
+            ),
+        "risk": 75
+    },
+
+    # ================= USB =================
+
+    {
+        "id": "USB-001",
+        "type": "usb_device_connected",
+        "log_type": "usb",
+        "condition": lambda l, d: True,
+        "risk": 20
+    },
+
+    # ================= DEFENDER =================
+
+    {
+        "id": "DEF-001",
+        "type": "defender_disabled",
+        "log_type": "defender",
+        "condition": lambda l, d:
+            "disabled" in l.message.lower() or "tamper" in l.message.lower(),
+        "risk": 95
+    },
+
+    # ================= GENERIC (LAST RESORT) =================
+
     {
         "id": "GEN-001",
-        "type": "malware_indicator",
+        "type": "generic_threat_indicator",
         "log_type": None,
         "condition": lambda l, d:
             any(k in l.message.lower() for k in GENERIC_THREAT_KEYWORDS),
-        "risk": 70
-    },
-    {
-        "id": "GEN-002",
-        "type": "ransomware_indicator",
-        "log_type": None,
-        "condition": lambda l, d:
-            "ransom" in l.message.lower(),
-        "risk": 95
-    },
-    {
-        "id": "GEN-003",
-        "type": "backdoor_activity",
-        "log_type": None,
-        "condition": lambda l, d:
-            "backdoor" in l.message.lower(),
-        "risk": 90
+        "risk": 65
     },
 ]
-
 
 # =====================================================
 # MAIN ENTRY POINT
 # =====================================================
 
+# def detect_anomalies(db: Session, log: LogEvent):
+#     if log.log_type == "system_metrics":
+#         return
+    
+    
+#     for rule in RULES:
+#         if rule["log_type"] and rule["log_type"] != log.log_type:
+#             continue
+
+#         try:
+#             if rule["condition"](log, db):
+#                 create_anomaly(
+#                     db=db,
+#                     rule_id=rule["id"],
+#                     anomaly_type=rule["type"],
+#                     source=log.log_type,
+#                     risk_score=rule["risk"],
+#                     log=log,
+#                     signals={
+#                         "message": log.message,
+#                         "ip": log.source_ip,
+#                         "user": log.user,
+#                         "timestamp": log.created_at.isoformat()
+#                     }
+#                 )
+#         except Exception as e:
+#             print(f"⚠️ Rule {rule['id']} failed → {e}")
+
 def detect_anomalies(db: Session, log: LogEvent):
-    if not should_analyze(log):
+    # 🚫 Metrics are not security events
+    if log.log_type == "system_metrics":
         return
+
+    # ✅ Parse raw_data safely
+    try:
+        raw = json.loads(log.raw_data) if log.raw_data else {}
+    except Exception:
+        raw = {}
+
+    src_ip = raw.get("src_ip") or raw.get("ip")
+    user = raw.get("user")
 
     for rule in RULES:
         if rule["log_type"] and rule["log_type"] != log.log_type:
@@ -397,10 +433,11 @@ def detect_anomalies(db: Session, log: LogEvent):
                     risk_score=rule["risk"],
                     log=log,
                     signals={
-                        "endpoint_id": log.endpoint_id,
-                        "severity": log.severity,
-                        "ip": extract_ip(log.message),
-                        "message": log.message
+                        "message": log.message,
+                        "ip": src_ip,
+                        "user": user,
+                        "log_type": log.log_type,
+                        "timestamp": log.timestamp.isoformat()
                     }
                 )
         except Exception as e:
